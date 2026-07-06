@@ -32,7 +32,17 @@
 
         craneLib = crane.mkLib pkgs;
 
-        src = craneLib.cleanCargoSource ./.;
+        # cleanCargoSource alone would drop the gRPC inputs: keep the
+        # .proto sources (tonic-build codegen) and the committed
+        # descriptor.bin (include_bytes! for server reflection).
+        src = lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            (lib.hasSuffix ".proto" path)
+            || (lib.hasSuffix ".bin" path)
+            || (craneLib.filterCargoSources path type);
+          name = "source";
+        };
 
         # The rockbox-dsp crate vendors and compiles the Rockbox DSP C
         # sources via `cc` (stdenv provides the compiler). cpal links
@@ -47,6 +57,8 @@
 
           nativeBuildInputs = [
             pkgs.pkg-config
+            # tonic-build regenerates the gRPC API from proto/ at build time.
+            pkgs.protobuf
           ] ++ lib.optionals pkgs.stdenv.isDarwin [
             # coreaudio-sys generates its CoreAudio bindings with bindgen at
             # build time; bindgenHook provides libclang (LIBCLANG_PATH) and
@@ -147,7 +159,9 @@
             clippy
             rust-analyzer
             pkg-config
+            protobuf # protoc for tonic-build codegen
             ffmpeg # handy for piping test audio into the equalizer
+            grpcurl # poke the control API by hand
           ];
 
           # Link-time libraries. Position matters: pkg-config only picks up

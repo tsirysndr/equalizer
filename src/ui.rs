@@ -6,8 +6,6 @@
 //! keys from /dev/tty when stdin is not a terminal.
 
 use std::io::{self, BufWriter};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -24,8 +22,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
-use crate::audio::{AudioStatus, STATE_ENDED, STATE_STREAMING};
-use crate::equalizer::Equalizer;
+use crate::audio::{STATE_ENDED, STATE_STREAMING};
+use crate::control::{Controller, EqSnapshot, PlayStatus};
 use crate::presets::PRESETS;
 use crate::settings::EQ_BANDS;
 
@@ -56,6 +54,7 @@ const TOTAL_COLS: usize = EQ_BANDS + 2;
 const METER_WIDTH: usize = 8;
 
 /// Static facts about the running pipeline, for the status line.
+#[derive(Clone)]
 pub struct StreamInfo {
     pub input: String,
     pub format: String,
@@ -77,7 +76,7 @@ struct App {
     meter_r: f32,
 }
 
-pub fn run(status: Arc<AudioStatus>, info: StreamInfo, preset: Option<usize>) -> Result<()> {
+pub fn run(ctrl: &dyn Controller, info: StreamInfo, preset: Option<usize>) -> Result<()> {
     enable_raw_mode()?;
     execute!(io::stderr(), EnterAlternateScreen)?;
     // Restore the terminal even if the draw loop panics.
@@ -91,7 +90,7 @@ pub fn run(status: Arc<AudioStatus>, info: StreamInfo, preset: Option<usize>) ->
     // BufWriter: stderr is unbuffered, so a bare backend would issue one
     // syscall per styled cell and make every frame visibly slow.
     let mut terminal = Terminal::new(CrosstermBackend::new(BufWriter::new(io::stderr())))?;
-    let result = event_loop(&mut terminal, &status, &info, preset);
+    let result = event_loop(&mut terminal, ctrl, &info, preset);
 
     disable_raw_mode()?;
     execute!(io::stderr(), LeaveAlternateScreen)?;
@@ -100,7 +99,7 @@ pub fn run(status: Arc<AudioStatus>, info: StreamInfo, preset: Option<usize>) ->
 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<BufWriter<io::Stderr>>>,
-    status: &AudioStatus,
+    ctrl: &dyn Controller,
     info: &StreamInfo,
     preset: Option<usize>,
 ) -> Result<()> {
@@ -115,13 +114,15 @@ fn event_loop(
     let mut last_edit = Instant::now();
 
     while !app.quit {
-        // Peak-hold with decay: take what the audio thread accumulated
-        // since the last frame, then fall back slowly.
+        let status = ctrl.status();
+        // Peak-hold with decay: jump to the latest chunk peak when it is
+        // louder, otherwise fall back slowly.
         let decay = 1800.0;
-        app.meter_l = (status.peak_l.swap(0, Ordering::Relaxed) as f32).max(app.meter_l - decay);
-        app.meter_r = (status.peak_r.swap(0, Ordering::Relaxed) as f32).max(app.meter_r - decay);
+        app.meter_l = (status.peak_l as f32).max(app.meter_l - decay);
+        app.meter_r = (status.peak_r as f32).max(app.meter_r - decay);
 
-        terminal.draw(|frame| draw(frame, &app, status, info))?;
+        let snapshot = ctrl.snapshot();
+        terminal.draw(|frame| draw(frame, &app, &snapshot, &status, info))?;
 
         // Block until the next event (or the meter tick), then drain the
         // whole queue before redrawing — otherwise a held-down key produces
@@ -131,7 +132,7 @@ fn event_loop(
             loop {
                 match event::read()? {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
-                        handle_key(&mut app, key);
+                        handle_key(&mut app, key, ctrl);
                         last_edit = Instant::now();
                     }
                     _ => {}
@@ -145,18 +146,17 @@ fn event_loop(
         // Debounce disk writes: persist once the user pauses instead of
         // rewriting the TOML on every keystroke.
         if app.dirty && last_edit.elapsed() > Duration::from_millis(400) {
-            Equalizer::global().save();
+            ctrl.save();
             app.dirty = false;
         }
     }
     if app.dirty {
-        Equalizer::global().save();
+        ctrl.save();
     }
     Ok(())
 }
 
-fn handle_key(app: &mut App, key: KeyEvent) {
-    let eq = Equalizer::global();
+fn handle_key(app: &mut App, key: KeyEvent, eq: &dyn Controller) {
     let coarse = key.modifiers.contains(KeyModifiers::SHIFT);
 
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -179,7 +179,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 // Bands are in tenths of dB: 0.5 dB fine, 2 dB coarse.
                 0..BASS_COL => {
                     let step = if coarse { 20 } else { 5 };
-                    eq.adjust_band_gain(app.selected, sign * step);
+                    eq.adjust_band(app.selected, sign * step);
                     app.preset = None;
                 }
                 // Tone shelves are in whole dB: 1 dB fine, 4 dB coarse.
@@ -206,7 +206,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             app.dirty = true;
         }
         KeyCode::Char(' ') | KeyCode::Char('e') => {
-            eq.set_enabled(!eq.is_enabled());
+            eq.set_enabled(!eq.snapshot().enabled);
             app.dirty = true;
         }
         KeyCode::Char('p' | 'P') => {
@@ -243,7 +243,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn draw(frame: &mut ratatui::Frame, app: &App, status: &AudioStatus, info: &StreamInfo) {
+fn draw(
+    frame: &mut ratatui::Frame,
+    app: &App,
+    eq: &EqSnapshot,
+    status: &PlayStatus,
+    info: &StreamInfo,
+) {
     // Breathing room: keep the bordered block off the window edges and
     // separate the status/help lines from it and from each other.
     let [sliders_area, _, status_area, _, help_area] = Layout::vertical([
@@ -257,13 +263,12 @@ fn draw(frame: &mut ratatui::Frame, app: &App, status: &AudioStatus, info: &Stre
     .vertical_margin(1)
     .areas(frame.area());
 
-    let eq = Equalizer::global();
-    let enabled = eq.is_enabled();
+    let enabled = eq.enabled;
 
     // Bands are stored in tenths of dB, the tone shelves in whole dB;
     // normalize everything to tenths for the slider columns.
     let mut columns: Vec<SliderColumn> = eq
-        .bands()
+        .bands
         .iter()
         .map(|b| SliderColumn {
             gain_tenths: b.gain,
@@ -272,14 +277,14 @@ fn draw(frame: &mut ratatui::Frame, app: &App, status: &AudioStatus, info: &Stre
         })
         .collect();
     columns.push(SliderColumn {
-        gain_tenths: eq.bass() * 10,
+        gain_tenths: eq.bass * 10,
         label: "Bass".to_string(),
-        dimmed: eq.bass() == 0,
+        dimmed: eq.bass == 0,
     });
     columns.push(SliderColumn {
-        gain_tenths: eq.treble() * 10,
+        gain_tenths: eq.treble * 10,
         label: "Treble".to_string(),
-        dimmed: eq.treble() == 0,
+        dimmed: eq.treble == 0,
     });
 
     let preset_name = app.preset.map(|i| PRESETS[i].name).unwrap_or("custom");
@@ -322,12 +327,11 @@ fn draw(frame: &mut ratatui::Frame, app: &App, status: &AudioStatus, info: &Stre
     );
 }
 
-fn status_line<'a>(app: &App, status: &AudioStatus, info: &'a StreamInfo) -> Paragraph<'a> {
-    let state = status.state.load(Ordering::Acquire);
-    let (state_text, state_color) = if let Some(err) = status.error.lock().unwrap().clone() {
+fn status_line<'a>(app: &App, status: &PlayStatus, info: &'a StreamInfo) -> Paragraph<'a> {
+    let (state_text, state_color) = if let Some(err) = status.error.clone() {
         (format!("✖ {err}"), RED)
     } else {
-        match state {
+        match status.state {
             STATE_STREAMING => ("▶ playing".to_string(), GREEN),
             STATE_ENDED => ("■ input ended".to_string(), YELLOW),
             _ => ("… waiting for input".to_string(), COMMENT),
@@ -339,7 +343,7 @@ fn status_line<'a>(app: &App, status: &AudioStatus, info: &'a StreamInfo) -> Par
     } else {
         format!("{}→{} Hz", info.in_rate, info.out_rate)
     };
-    let seconds = status.frames_played.load(Ordering::Relaxed) / info.out_rate.max(1) as u64;
+    let seconds = status.frames_played / info.out_rate.max(1) as u64;
     let elapsed = format!("{:02}:{:02}", seconds / 60, seconds % 60);
 
     let spans = vec![

@@ -29,6 +29,7 @@ via [cpal](https://crates.io/crates/cpal) — while a
   - [FIFO (named pipe)](#fifo-named-pipe)
   - [Unix socket](#unix-socket)
 - [Spotify via spotifyd](#spotify-via-spotifyd)
+- [Remote Control (gRPC API)](#remote-control-grpc-api)
 - [CLI Options](#cli-options)
 - [Keybindings](#keybindings)
 - [Presets](#presets)
@@ -53,6 +54,9 @@ via [cpal](https://crates.io/crates/cpal) — while a
   restored on the next run
 - **Presets** — rock, pop, jazz, classical, electronic, vocal,
   bass-boost, treble-boost, flat
+- **Remote control** — a gRPC API on a unix socket (and optionally TCP);
+  run `equalizer` again on the same machine and it becomes a remote TUI
+  for the running instance, or use `--connect` from another machine
 
 ## Installation
 
@@ -229,6 +233,51 @@ Pick **spotifyd** as the playback device in any Spotify client and the
 audio flows through the EQ. No `-f`/`-r` flags are needed — `S16` at
 44100 Hz stereo is exactly what equalizer expects by default.
 
+## Remote Control (gRPC API)
+
+Every running instance serves a [gRPC API](proto/equalizer/v1/equalizer.proto)
+on a **unix socket** by default (per-user runtime path, e.g.
+`$XDG_RUNTIME_DIR/equalizer/equalizer.sock` on Linux). Add `--port` to also
+serve it over **TCP on `0.0.0.0`** for other machines:
+
+```sh
+# machine A: play audio headless, control API on unix socket + tcp :50051
+ffmpeg -i track.flac -f s16le -ac 2 -ar 44100 - | equalizer --no-tui --port 50051
+# prints:  api token: 67faefc3…   (stdout, capture it in scripts)
+
+# machine A, another terminal: plain `equalizer` notices the running
+# instance and opens the TUI connected to it via the socket
+equalizer
+
+# machine B: remote TUI over TCP (token from A's settings.toml or stdout)
+equalizer --connect machine-a:50051 --token 67faefc3…
+# or: EQUALIZER_TOKEN=67faefc3… equalizer --connect machine-a:50051
+```
+
+The remote TUI is the full interface — sliders, presets, meters and the
+server's playback status; `s`/auto-save persist to the **server's**
+settings file. Multiple clients can connect at once and stay in sync.
+
+The TCP endpoint requires a bearer token; it is generated automatically,
+stored as `token` under `[api]` in the settings file, and printed to
+stdout in `--no-tui` mode. The unix socket needs no token (it is already
+per-user). Server reflection is enabled, so scripting works with plain
+[grpcurl](https://github.com/fullstorydev/grpcurl):
+
+```sh
+sock="unix://${TMPDIR:-/tmp}/equalizer-$(id -u).sock"   # macOS default path
+grpcurl -plaintext $sock equalizer.v1.EqualizerService/GetState
+grpcurl -plaintext -d '{"name":"rock"}' $sock equalizer.v1.EqualizerService/ApplyPreset
+grpcurl -plaintext -d '{"band":5,"delta_tenths_db":20}' $sock equalizer.v1.EqualizerService/AdjustBand
+grpcurl -plaintext -d '{"bass_delta_db":6}' $sock equalizer.v1.EqualizerService/AdjustTone
+grpcurl -plaintext $sock equalizer.v1.EqualizerService/WatchState   # 10 Hz state stream
+grpcurl -plaintext -H "authorization: Bearer $TOKEN" host:50051 \
+        equalizer.v1.EqualizerService/GetState                     # over TCP
+```
+
+Configure it under `[api]` in the [settings file](#settings-file) or with
+the CLI flags below; `--no-api` turns the whole thing off.
+
 ## CLI Options
 
 | Flag | Default | Description |
@@ -239,9 +288,14 @@ audio flows through the EQ. No `-f`/`-r` flags are needed — `S16` at
 | `-f, --format <FMT>` | `s16le` | `s16le`, `s24le`, `s32le`, `f32le`, `f64le` |
 | `-d, --device <NAME>` | default | Output device (case-insensitive substring) |
 | `--list-devices` | | Print output devices and exit |
-| `-p, --preset <NAME>` | | Apply a [preset](#presets) on startup |
+| `-p, --preset <NAME>` | | Apply a [preset](#presets) on startup (local or remote) |
 | `--config <PATH>` | user config dir | Settings file location |
 | `--no-tui` | | Headless: apply saved settings, no interface |
+| `--api-socket <PATH>` | runtime dir | Control-API unix socket path |
+| `--port <PORT>` | off | Also serve the control API on `0.0.0.0:<PORT>` |
+| `--no-api` | | Do not serve the control API |
+| `--connect [ADDR]` | local socket | Remote TUI: `host:port`, `unix:PATH`, or a socket path |
+| `--token <TOKEN>` | `$EQUALIZER_TOKEN` | Bearer token for a remote server's TCP API |
 
 ## Keybindings
 
@@ -285,6 +339,13 @@ cutoff = 32   # Hz
 q = 7         # Q 0.7
 gain = 50     # +5.0 dB
 # … 9 more bands: 63, 125, 250, 500, 1k, 2k, 4k, 8k, 16k
+
+[api]
+enabled = true      # unix-socket control API (default on)
+# socket = "/path/to/equalizer.sock"   # override the default path
+# port = 50051      # also serve on TCP (host:port) — same as --port
+host = "0.0.0.0"    # TCP bind address
+# token = "…"       # TCP bearer token, auto-generated on first TCP use
 ```
 
 Every change in the TUI is persisted immediately, so the next run starts

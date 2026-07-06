@@ -12,6 +12,8 @@ dependencies:
   - gcc
   - pkg-config
   - alsa-lib
+  # tonic-build regenerates the gRPC API from proto/ at build time.
+  - protobuf
 
 steps:
   - name: nix build

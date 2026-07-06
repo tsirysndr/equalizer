@@ -1,12 +1,18 @@
 //! equalizer — pipe raw PCM through the Rockbox 10-band EQ to the sound
 //! card, with a ratatui front-end for live band / bass / treble tweaking.
 
+mod api;
 mod audio;
+mod control;
 mod equalizer;
 mod presets;
+mod remote;
+mod server;
 mod settings;
 mod ui;
 
+use std::io::IsTerminal;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -18,7 +24,9 @@ use clap::builder::styling::{Color, RgbColor, Style, Styles};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::audio::{AudioStatus, PcmFormat, PipelineConfig};
+use crate::control::{Controller, LocalController};
 use crate::equalizer::Equalizer;
+use crate::settings::{Settings, default_socket_path};
 
 /// Synthwave '84 palette applied to clap's help & error output — mirrors
 /// the ratatui theme in `ui::theme`.
@@ -95,9 +103,53 @@ struct Cli {
     /// Headless mode: no TUI, run until the input ends.
     #[arg(long)]
     no_tui: bool,
+
+    /// Control-API unix socket path (default: per-user runtime path, or
+    /// `[api] socket` in the settings file). Served automatically.
+    #[arg(long, value_name = "PATH")]
+    api_socket: Option<PathBuf>,
+
+    /// Also serve the control API over TCP on 0.0.0.0:<PORT> (or `[api]
+    /// port`/`host` in the settings file). Protected by `[api] token`,
+    /// auto-generated on first use.
+    #[arg(long, value_name = "PORT")]
+    port: Option<u16>,
+
+    /// Do not serve the control API at all.
+    #[arg(long)]
+    no_api: bool,
+
+    /// Remote TUI: control another equalizer instead of playing audio.
+    /// ADDR is "host:port", "http://host:port", "unix:PATH" or a socket
+    /// path; with no value, the default local socket. Plain `equalizer`
+    /// with no piped input auto-connects when a local instance is running.
+    #[arg(
+        long,
+        value_name = "ADDR",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["input", "rate", "channels", "format", "device",
+                              "list_devices", "no_tui", "api_socket", "port", "no_api"]
+    )]
+    connect: Option<String>,
+
+    /// Bearer token for a remote server's TCP API (env: EQUALIZER_TOKEN;
+    /// printed/stored by the server as `[api] token` in its settings file).
+    #[arg(long, value_name = "TOKEN")]
+    token: Option<String>,
 }
 
 fn main() -> Result<()> {
+    // Logs go to stderr (stdout may be captured by scripts). RUST_LOG
+    // overrides the default `info` filter.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let cli = Cli::parse();
     if let Some(path) = &cli.config {
         settings::set_path_override(path.clone());
@@ -112,6 +164,42 @@ fn main() -> Result<()> {
             println!("{}", device.name().unwrap_or_else(|_| "<unknown>".into()));
         }
         return Ok(());
+    }
+
+    // Client mode: explicit --connect, or auto-connect when nothing is
+    // piped in and another local instance already owns the control socket.
+    let api_cfg = Settings::load().api;
+    let socket_path = cli
+        .api_socket
+        .clone()
+        .or_else(|| api_cfg.socket.clone())
+        .unwrap_or_else(default_socket_path);
+    let connect_target = cli.connect.clone().or_else(|| {
+        (cli.input == "-"
+            && std::io::stdin().is_terminal()
+            && !cli.no_tui
+            && server::socket_is_live(&socket_path))
+        .then(|| socket_path.to_string_lossy().into_owned())
+    });
+    if let Some(addr) = connect_target {
+        let token = cli
+            .token
+            .clone()
+            .or_else(|| std::env::var("EQUALIZER_TOKEN").ok());
+        let (ctrl, info) = remote::connect(&addr, token)?;
+        let preset_idx = match &cli.preset {
+            Some(name) => {
+                let idx = presets::find(name).with_context(|| {
+                    format!("unknown preset {name:?} (available: {})", presets::names())
+                })?;
+                ctrl.set_band_gains_db(&presets::PRESETS[idx].gains_db);
+                ctrl.set_enabled(true);
+                ctrl.save();
+                Some(idx)
+            }
+            None => None,
+        };
+        return ui::run(&ctrl, info, preset_idx);
     }
 
     let eq = Equalizer::global();
@@ -167,37 +255,115 @@ fn main() -> Result<()> {
     }?;
     stream.play().context("failed to start output stream")?;
 
+    let info = ui::StreamInfo {
+        input: input_label(&cli.input),
+        format: format!("{} {}ch", cli.format.label(), cli.channels),
+        in_rate: cli.rate,
+        out_rate,
+        device: device_name.clone(),
+    };
+    let api = serve_api(&cli, socket_path, Arc::clone(&status), info.clone())?;
+
     if cli.no_tui {
-        eprintln!(
-            "input : {} ({} {}ch {} Hz)",
+        tracing::info!(
+            "input: {} ({} {}ch {} Hz)",
             input_label(&cli.input),
             cli.format.label(),
             cli.channels,
             cli.rate
         );
-        eprintln!("output: {device_name} @ {out_rate} Hz");
+        tracing::info!("output: {device_name} @ {out_rate} Hz");
+        if let Some(endpoints) = &api {
+            if let Some(path) = &endpoints.socket {
+                tracing::info!("api: unix {}", path.display());
+            }
+            if let Some(addr) = endpoints.tcp {
+                tracing::info!("api: tcp {addr} (token required)");
+            }
+            if let Some(token) = &endpoints.token {
+                // stdout on purpose (not a log): scripts starting a headless
+                // server capture the token to hand to remote clients.
+                println!("api token: {token}");
+            }
+        }
         reader.join().ok();
         while status.queued.load(std::sync::atomic::Ordering::Acquire) > 0 {
             std::thread::sleep(Duration::from_millis(50));
         }
         std::thread::sleep(Duration::from_millis(200)); // let the device drain
+        cleanup_socket(&api);
         if let Some(err) = status.error.lock().unwrap().clone() {
             bail!(err);
         }
     } else {
-        let info = ui::StreamInfo {
-            input: input_label(&cli.input),
-            format: format!("{} {}ch", cli.format.label(), cli.channels),
-            in_rate: cli.rate,
-            out_rate,
-            device: device_name,
-        };
-        ui::run(Arc::clone(&status), info, preset_idx)?;
+        let ctrl = LocalController::new(Arc::clone(&status));
+        let result = ui::run(&ctrl, info, preset_idx);
+        cleanup_socket(&api);
+        result?;
         eq.save();
         // The reader may be blocked on a FIFO open or a full channel;
         // dropping the stream/rx unblocks the latter, process exit the rest.
     }
     Ok(())
+}
+
+/// Resolve the control-API endpoints (CLI > settings file > defaults) and
+/// start serving them. The TCP endpoint requires the persisted `[api]`
+/// token, generated on first use.
+fn serve_api(
+    cli: &Cli,
+    socket_path: PathBuf,
+    status: Arc<AudioStatus>,
+    info: ui::StreamInfo,
+) -> Result<Option<server::Endpoints>> {
+    if cli.no_api {
+        return Ok(None);
+    }
+    let cfg = Settings::load().api;
+
+    // An explicit --api-socket serves even when the config disables the
+    // default-on socket.
+    let socket = (cfg.enabled || cli.api_socket.is_some()).then_some(socket_path);
+
+    let tcp = match cli.port.or(cfg.port) {
+        Some(port) => {
+            let host: IpAddr = cfg
+                .host
+                .parse()
+                .with_context(|| format!("invalid [api] host {:?} in settings", cfg.host))?;
+            Some(SocketAddr::new(host, port))
+        }
+        None => None,
+    };
+
+    // Only the network endpoint needs the token; don't generate one for
+    // purely local (socket) use.
+    let token = match (&tcp, cfg.token) {
+        (None, _) => None,
+        (Some(_), Some(token)) => Some(token),
+        (Some(_), None) => {
+            let token = server::generate_token()?;
+            let mut settings = Settings::load();
+            settings.api.token = Some(token.clone());
+            settings
+                .save()
+                .context("failed to persist the generated API token")?;
+            Some(token)
+        }
+    };
+
+    if socket.is_none() && tcp.is_none() {
+        return Ok(None);
+    }
+    server::spawn(server::Endpoints { socket, tcp, token }, status, info).map(Some)
+}
+
+/// Best-effort removal of the socket file we bound, so restarts never see
+/// a stale path.
+fn cleanup_socket(api: &Option<server::Endpoints>) {
+    if let Some(path) = api.as_ref().and_then(|e| e.socket.as_ref()) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn input_label(input: &str) -> String {

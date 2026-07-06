@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package equalizer.v1;
+
+// Remote control for a running `equalizer` process: the same 10-band
+// Rockbox EQ + bass/treble shelves the TUI drives, plus pipeline telemetry
+// for a remote status line / level meter.
+service EqualizerService {
+  // One-shot snapshot (also carries the stream info a client needs once).
+  rpc GetState(GetStateRequest) returns (State) {}
+  // Snapshots streamed at ~10 Hz: EQ state, playback state and level peaks.
+  rpc WatchState(WatchStateRequest) returns (stream State) {}
+
+  rpc SetEnabled(SetEnabledRequest) returns (State) {}
+  // Relative band gain change in tenths of dB (matches the TUI keys).
+  rpc AdjustBand(AdjustBandRequest) returns (State) {}
+  // Absolute gains for all 10 bands in tenths of dB (cutoffs/Q are kept).
+  rpc SetBandGains(SetBandGainsRequest) returns (State) {}
+  // Relative bass/treble shelf change in whole dB.
+  rpc AdjustTone(AdjustToneRequest) returns (State) {}
+  // All band gains and both tone shelves back to 0 dB.
+  rpc ResetGains(ResetGainsRequest) returns (State) {}
+  // Apply a built-in preset by name (see ListPresets) and enable the EQ.
+  rpc ApplyPreset(ApplyPresetRequest) returns (State) {}
+  rpc ListPresets(ListPresetsRequest) returns (ListPresetsResponse) {}
+  // Persist the current state to the server's settings file.
+  rpc Save(SaveRequest) returns (SaveResponse) {}
+}
+
+message GetStateRequest {}
+
+message WatchStateRequest {}
+
+message SetEnabledRequest {
+  bool enabled = 1;
+}
+
+message AdjustBandRequest {
+  // Band index 0..9 (0 = 32 Hz low shelf … 9 = 16 kHz high shelf).
+  uint32 band = 1;
+  int32 delta_tenths_db = 2;
+}
+
+message SetBandGainsRequest {
+  // Exactly 10 values, tenths of dB, clamped to ±240.
+  repeated int32 gains_tenths_db = 1;
+}
+
+message AdjustToneRequest {
+  int32 bass_delta_db = 1;
+  int32 treble_delta_db = 2;
+}
+
+message ResetGainsRequest {}
+
+message ApplyPresetRequest {
+  string name = 1;
+}
+
+message ListPresetsRequest {}
+
+message ListPresetsResponse {
+  repeated Preset presets = 1;
+}
+
+message Preset {
+  string name = 1;
+  // 10 gains in whole dB.
+  repeated int32 gains_db = 2;
+}
+
+message SaveRequest {}
+
+message SaveResponse {}
+
+// One EQ band in Rockbox units.
+message Band {
+  int32 cutoff_hz = 1;
+  // Q × 10 (7 = Q 0.7).
+  int32 q_tenths = 2;
+  // Gain × 10 in dB.
+  int32 gain_tenths_db = 3;
+}
+
+enum PlaybackState {
+  PLAYBACK_STATE_WAITING = 0;
+  PLAYBACK_STATE_STREAMING = 1;
+  PLAYBACK_STATE_ENDED = 2;
+}
+
+// Static facts about the server's audio pipeline.
+message StreamInfo {
+  string input = 1;
+  // e.g. "s16le 2ch".
+  string format = 2;
+  uint32 in_rate = 3;
+  uint32 out_rate = 4;
+  string device = 5;
+}
+
+message State {
+  bool enabled = 1;
+  repeated Band bands = 2;
+  int32 bass_db = 3;
+  int32 treble_db = 4;
+  // Bumped on every change; lets watchers cheaply detect edits.
+  uint64 version = 5;
+
+  PlaybackState playback = 6;
+  // Pipeline error message; empty when healthy.
+  string error = 7;
+  uint64 frames_played = 8;
+  // Latest post-DSP chunk peak per channel, i16 full-scale units.
+  int32 peak_l = 9;
+  int32 peak_r = 10;
+
+  StreamInfo stream = 11;
+}

@@ -61,7 +61,9 @@ pub const STATE_ENDED: u8 = 2;
 pub struct AudioStatus {
     /// Processed samples queued between the DSP and the output callback.
     pub queued: AtomicUsize,
-    /// Post-DSP peak per channel since the UI last read it (`swap(0)`).
+    /// Post-DSP peak per channel of the most recent ~10 ms chunk. Written
+    /// with `store` (not accumulated) so any number of consumers — the
+    /// local TUI and remote gRPC watchers — can `load` it independently.
     pub peak_l: AtomicI32,
     pub peak_r: AtomicI32,
     /// Frames actually played (drives the elapsed-time display).
@@ -84,6 +86,12 @@ impl AudioStatus {
 
     fn set_state(&self, state: u8) {
         self.state.store(state, Ordering::Release);
+        // No more chunks coming — drop the meters to silence instead of
+        // freezing them at the last chunk's peak.
+        if state != STATE_STREAMING {
+            self.peak_l.store(0, Ordering::Relaxed);
+            self.peak_r.store(0, Ordering::Relaxed);
+        }
     }
 
     fn set_error(&self, msg: String) {
@@ -268,8 +276,8 @@ fn update_peaks(stereo: &[i16], status: &AudioStatus) {
         pl = pl.max((frame[0] as i32).abs());
         pr = pr.max((frame[1] as i32).abs());
     }
-    status.peak_l.fetch_max(pl, Ordering::Relaxed);
-    status.peak_r.fetch_max(pr, Ordering::Relaxed);
+    status.peak_l.store(pl, Ordering::Relaxed);
+    status.peak_r.store(pr, Ordering::Relaxed);
 }
 
 /// cpal output stream pulling processed stereo i16 chunks from the channel;
@@ -319,7 +327,7 @@ where
                 }
             }
         },
-        |e| eprintln!("stream error: {e}"),
+        |e| tracing::error!("stream error: {e}"),
         None,
     )?;
     Ok(stream)

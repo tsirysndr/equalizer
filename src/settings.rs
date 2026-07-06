@@ -24,6 +24,50 @@ pub struct EqBand {
     pub gain: i32,
 }
 
+/// gRPC control API configuration (`[api]` in settings.toml). CLI flags
+/// (`--api-socket`, `--port`, `--no-api`) take precedence over these.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiConfig {
+    /// Serve the control API on a unix socket. On by default.
+    pub enabled: bool,
+    /// Unix socket path; unset = per-user default (see [`default_socket_path`]).
+    pub socket: Option<PathBuf>,
+    /// Also serve over TCP on `host:port`. Unset = no network API.
+    pub port: Option<u16>,
+    /// TCP bind address, used only when `port` is set.
+    pub host: String,
+    /// Bearer token required on the TCP endpoint. Auto-generated and
+    /// written back here the first time the TCP API is enabled. The unix
+    /// socket never requires it.
+    pub token: Option<String>,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            socket: None,
+            port: None,
+            host: "0.0.0.0".to_string(),
+            token: None,
+        }
+    }
+}
+
+/// Default unix socket the API listens on (and `--connect` dials when no
+/// address is given): the per-user runtime dir when the platform has one,
+/// otherwise a uid-suffixed path in the temp dir.
+pub fn default_socket_path() -> PathBuf {
+    if let Some(dirs) = ProjectDirs::from("io", "tsirysndr", "equalizer") {
+        if let Some(runtime) = dirs.runtime_dir() {
+            return runtime.join("equalizer.sock");
+        }
+    }
+    let uid = unsafe { libc::getuid() };
+    std::env::temp_dir().join(format!("equalizer-{uid}.sock"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// Rockbox-style top-level equalizer on/off. On by default.
@@ -46,6 +90,9 @@ pub struct Settings {
     /// Treble shelf cutoff in Hz. `0` = Rockbox default 3500 Hz.
     #[serde(default)]
     pub treble_cutoff: i32,
+    /// gRPC control API (`[api]` section).
+    #[serde(default)]
+    pub api: ApiConfig,
 }
 
 fn default_true() -> bool {
@@ -61,6 +108,7 @@ impl Default for Settings {
             treble: 0,
             bass_cutoff: 0,
             treble_cutoff: 0,
+            api: ApiConfig::default(),
         }
     }
 }
@@ -87,7 +135,7 @@ impl Settings {
         let path = match settings_path() {
             Ok(path) => path,
             Err(err) => {
-                eprintln!("warning: {}", err);
+                tracing::warn!("{err}");
                 return Self::default();
             }
         };
@@ -95,7 +143,7 @@ impl Settings {
             Ok(content) => match toml::from_str::<Settings>(&content) {
                 Ok(settings) => settings,
                 Err(err) => {
-                    eprintln!("warning: settings file corrupted ({}), using defaults", err);
+                    tracing::warn!("settings file corrupted ({err}), using defaults");
                     Self::default()
                 }
             },
@@ -117,9 +165,8 @@ impl Settings {
     fn ensure_eq_bands(&mut self) {
         let defaults = default_eq_band_settings();
         if self.eq_band_settings.len() < EQ_BANDS {
-            for i in self.eq_band_settings.len()..EQ_BANDS {
-                self.eq_band_settings.push(defaults[i]);
-            }
+            let have = self.eq_band_settings.len();
+            self.eq_band_settings.extend_from_slice(&defaults[have..]);
         } else {
             self.eq_band_settings.truncate(EQ_BANDS);
         }
@@ -156,11 +203,13 @@ mod tests {
 
     #[test]
     fn settings_roundtrip_toml() {
-        let mut settings = Settings::default();
-        settings.eq_enabled = true;
+        let mut settings = Settings {
+            eq_enabled: true,
+            bass: 6,
+            treble: -3,
+            ..Settings::default()
+        };
         settings.eq_band_settings[3].gain = -55;
-        settings.bass = 6;
-        settings.treble = -3;
 
         let text = toml::to_string_pretty(&settings).unwrap();
         let back: Settings = toml::from_str(&text).unwrap();

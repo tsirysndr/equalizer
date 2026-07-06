@@ -114,6 +114,17 @@ impl Equalizer {
         self.bump();
     }
 
+    /// Replace band gains from absolute tenths-of-dB values (the gRPC
+    /// `SetBandGains` unit). Cutoffs and Q are kept.
+    pub fn set_band_gains_tenths(&self, gains_tenths: &[i32]) {
+        let mut bands = self.bands.lock().unwrap();
+        for (b, g) in bands.iter_mut().zip(gains_tenths) {
+            b.gain = (*g).clamp(GAIN_MIN_TENTHS, GAIN_MAX_TENTHS);
+        }
+        drop(bands);
+        self.bump();
+    }
+
     /// Reset every band's gain and the tone shelves to 0 dB (cutoffs and
     /// Q are kept).
     pub fn reset_gains(&self) {
@@ -131,19 +142,24 @@ impl Equalizer {
         self.version.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Persist the current state to the settings file.
+    /// Persist the current state to the settings file, warning on failure.
     pub fn save(&self) {
-        let settings = Settings {
-            eq_enabled: self.is_enabled(),
-            eq_band_settings: self.bands(),
-            bass: self.bass(),
-            treble: self.treble(),
-            bass_cutoff: self.bass_cutoff.load(Ordering::Relaxed),
-            treble_cutoff: self.treble_cutoff.load(Ordering::Relaxed),
-        };
-        if let Err(err) = settings.save() {
-            eprintln!("warning: failed to save settings: {}", err);
+        if let Err(err) = self.try_save() {
+            tracing::warn!("failed to save settings: {err}");
         }
+    }
+
+    /// Persist the current state to the settings file. Loads the file
+    /// first so non-EQ sections (e.g. `[api]`) survive the rewrite.
+    pub fn try_save(&self) -> Result<(), anyhow::Error> {
+        let mut settings = Settings::load();
+        settings.eq_enabled = self.is_enabled();
+        settings.eq_band_settings = self.bands();
+        settings.bass = self.bass();
+        settings.treble = self.treble();
+        settings.bass_cutoff = self.bass_cutoff.load(Ordering::Relaxed);
+        settings.treble_cutoff = self.treble_cutoff.load(Ordering::Relaxed);
+        settings.save()
     }
 
     #[cfg(test)]
