@@ -28,6 +28,7 @@ via [cpal](https://crates.io/crates/cpal) — while a
   - [stdin pipe](#stdin-pipe)
   - [FIFO (named pipe)](#fifo-named-pipe)
   - [Unix socket](#unix-socket)
+- [Spotify via spotifyd](#spotify-via-spotifyd)
 - [CLI Options](#cli-options)
 - [Keybindings](#keybindings)
 - [Presets](#presets)
@@ -192,6 +193,41 @@ and reads PCM from the peer:
 ```sh
 equalizer /tmp/audio.sock
 ```
+
+## Spotify via spotifyd
+
+[spotifyd](https://github.com/Spotifyd/spotifyd) can feed Spotify straight
+into the equalizer through a FIFO. **This is the only spotifyd setup that
+works with equalizer** — use exactly this config (`~/.config/spotifyd/spotifyd.conf`):
+
+```toml
+[global]
+# Write raw PCM to a FIFO instead of stdout — spotifyd prints its log
+# lines to stdout, so piping stdout into equalizer corrupts the stream.
+backend = "pipe"
+device = "/tmp/spotifyd.fifo"
+
+# s16le 44100 Hz stereo — matches equalizer's defaults exactly.
+audio_format = "S16"
+
+device_name = "spotifyd"
+bitrate = 320
+
+# Spotify volume normalisation, so all tracks hit the EQ at a similar level.
+volume_normalisation = true
+normalisation_pregain = 0
+```
+
+Then start the equalizer on the FIFO and launch spotifyd:
+
+```sh
+equalizer /tmp/spotifyd.fifo   # creates the FIFO and waits for audio
+spotifyd --no-daemon           # in another terminal
+```
+
+Pick **spotifyd** as the playback device in any Spotify client and the
+audio flows through the EQ. No `-f`/`-r` flags are needed — `S16` at
+44100 Hz stereo is exactly what equalizer expects by default.
 
 ## CLI Options
 
