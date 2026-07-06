@@ -28,6 +28,7 @@ via [cpal](https://crates.io/crates/cpal) — while a
   - [stdin pipe](#stdin-pipe)
   - [FIFO (named pipe)](#fifo-named-pipe)
   - [Unix socket](#unix-socket)
+- [Output Targets](#output-targets)
 - [Spotify via spotifyd](#spotify-via-spotifyd)
 - [Remote Control (gRPC API)](#remote-control-grpc-api)
 - [CLI Options](#cli-options)
@@ -50,6 +51,8 @@ via [cpal](https://crates.io/crates/cpal) — while a
 - **Any raw PCM source** — stdin, FIFO, or unix socket; `s16le`, `s24le`,
   `s32le`, `f32le`, `f64le`; mono/stereo/multichannel; any sample rate
   (resampled to the device rate by the DSP)
+- **Configurable output** — sound card by default, or run as a pure PCM
+  filter writing s16le to stdout / a FIFO (`--output`)
 - **Persistent settings** — every change is saved to a TOML file and
   restored on the next run
 - **Presets** — rock, pop, jazz, classical, electronic, vocal,
@@ -198,6 +201,30 @@ and reads PCM from the peer:
 equalizer /tmp/audio.sock
 ```
 
+## Output Targets
+
+By default the processed audio plays on the sound card (`--device` picks
+one). With `--output` the equalizer becomes a pure PCM filter instead —
+raw interleaved stereo `s16le` at the input rate (no resampling), paced
+by whatever consumes the pipe:
+
+```sh
+# stdout: chain into any player or encoder
+ffmpeg -i track.flac -f s16le -ac 2 -ar 44100 - 2>/dev/null \
+  | equalizer --output - \
+  | ffplay -f s16le -ac 2 -ar 44100 -nodisp -   # or aplay, sox, ffmpeg …
+
+# FIFO: created if missing; opening blocks until a reader connects
+equalizer /tmp/in.fifo --output /tmp/out.fifo
+```
+
+The TUI still works on either (it renders to stderr, keys come from
+`/dev/tty`), and so does the [control API](#remote-control-grpc-api) —
+e.g. spotifyd → equalizer → FIFO, with the EQ tweaked from another
+machine. In `--no-tui` mode with `--output -`, the auto-generated API
+token is logged to stderr instead of stdout so it never corrupts the
+PCM stream.
+
 ## Spotify via spotifyd
 
 [spotifyd](https://github.com/Spotifyd/spotifyd) can feed Spotify straight
@@ -287,6 +314,7 @@ the CLI flags below; `--no-api` turns the whole thing off.
 | `-c, --channels <N>` | `2` | Input channels (1 = upmixed, >2 = front pair) |
 | `-f, --format <FMT>` | `s16le` | `s16le`, `s24le`, `s32le`, `f32le`, `f64le` |
 | `-d, --device <NAME>` | default | Output device (case-insensitive substring) |
+| `-o, --output <TARGET>` | `default` | `default` = sound card, `-` = raw s16le on stdout, else FIFO path |
 | `--list-devices` | | Print output devices and exit |
 | `-p, --preset <NAME>` | | Apply a [preset](#presets) on startup (local or remote) |
 | `--config <PATH>` | user config dir | Settings file location |

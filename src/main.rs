@@ -23,7 +23,7 @@ use clap::Parser;
 use clap::builder::styling::{Color, RgbColor, Style, Styles};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::audio::{AudioStatus, PcmFormat, PipelineConfig};
+use crate::audio::{AudioStatus, OutputTarget, PcmFormat, PipelineConfig};
 use crate::control::{Controller, LocalController};
 use crate::equalizer::Equalizer;
 use crate::settings::{Settings, default_socket_path};
@@ -83,8 +83,15 @@ struct Cli {
 
     /// Output device name (case-insensitive substring); default device
     /// otherwise. See --list-devices.
-    #[arg(short = 'd', long)]
+    #[arg(short = 'd', long, conflicts_with = "output")]
     device: Option<String>,
+
+    /// Audio output: "default" plays on the sound card; "-" writes raw
+    /// s16le stereo PCM to stdout; any other value is a FIFO path
+    /// (created if missing). Pipe outputs run at the input rate (no
+    /// resampling) and are paced by the consumer.
+    #[arg(short = 'o', long, value_name = "TARGET")]
+    output: Option<String>,
 
     /// List output devices and exit.
     #[arg(long)]
@@ -128,7 +135,7 @@ struct Cli {
         value_name = "ADDR",
         num_args = 0..=1,
         default_missing_value = "",
-        conflicts_with_all = ["input", "rate", "channels", "format", "device",
+        conflicts_with_all = ["input", "rate", "channels", "format", "device", "output",
                               "list_devices", "no_tui", "api_socket", "port", "no_api"]
     )]
     connect: Option<String>,
@@ -176,6 +183,7 @@ fn main() -> Result<()> {
         .unwrap_or_else(default_socket_path);
     let connect_target = cli.connect.clone().or_else(|| {
         (cli.input == "-"
+            && cli.output.is_none()
             && std::io::stdin().is_terminal()
             && !cli.no_tui
             && server::socket_is_live(&socket_path))
@@ -216,12 +224,33 @@ fn main() -> Result<()> {
         None => None,
     };
 
-    let device = pick_device(&host, cli.device.as_deref())?;
-    let device_name = device.name().unwrap_or_else(|_| "<unknown>".into());
-    let config = device
-        .default_output_config()
-        .context("no default output config")?;
-    let out_rate = config.sample_rate().0;
+    let output = match cli.output.as_deref() {
+        None | Some("default") => None,
+        Some("-") => Some(OutputTarget::Stdout),
+        Some(path) => Some(OutputTarget::Fifo(path.into())),
+    };
+
+    // Pipe outputs have no device clock: the DSP runs at the input rate
+    // (resampler inactive) and the consumer paces the pipeline.
+    let device_stuff = match &output {
+        None => {
+            let device = pick_device(&host, cli.device.as_deref())?;
+            let config = device
+                .default_output_config()
+                .context("no default output config")?;
+            Some((device, config))
+        }
+        Some(_) => None,
+    };
+    let out_rate = match &device_stuff {
+        Some((_, config)) => config.sample_rate().0,
+        None => cli.rate,
+    };
+    let device_name = match (&output, &device_stuff) {
+        (Some(target), _) => target.label(),
+        (None, Some((device, _))) => device.name().unwrap_or_else(|_| "<unknown>".into()),
+        (None, None) => unreachable!(),
+    };
 
     let status = Arc::new(AudioStatus::new());
     // Small bound: post-DSP buffering is what delays audible EQ changes
@@ -240,20 +269,36 @@ fn main() -> Result<()> {
         move || audio::reader_loop(pipeline, status, tx)
     });
 
-    let stream_config: cpal::StreamConfig = config.clone().into();
-    let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => {
-            audio::build_stream::<f32>(&device, &stream_config, rx, Arc::clone(&status))
+    // Either a live cpal stream (kept alive by the binding) or the writer
+    // thread draining the channel into a pipe.
+    enum Sink {
+        Device(#[allow(dead_code)] cpal::Stream),
+        Pipe(std::thread::JoinHandle<()>),
+    }
+    let sink = match (output, device_stuff) {
+        (Some(target), _) => Sink::Pipe(std::thread::spawn({
+            let status = Arc::clone(&status);
+            move || audio::writer_loop(target, status, rx)
+        })),
+        (None, Some((device, config))) => {
+            let stream_config: cpal::StreamConfig = config.clone().into();
+            let stream = match config.sample_format() {
+                cpal::SampleFormat::F32 => {
+                    audio::build_stream::<f32>(&device, &stream_config, rx, Arc::clone(&status))
+                }
+                cpal::SampleFormat::I16 => {
+                    audio::build_stream::<i16>(&device, &stream_config, rx, Arc::clone(&status))
+                }
+                cpal::SampleFormat::U16 => {
+                    audio::build_stream::<u16>(&device, &stream_config, rx, Arc::clone(&status))
+                }
+                other => bail!("unsupported output sample format {other:?}"),
+            }?;
+            stream.play().context("failed to start output stream")?;
+            Sink::Device(stream)
         }
-        cpal::SampleFormat::I16 => {
-            audio::build_stream::<i16>(&device, &stream_config, rx, Arc::clone(&status))
-        }
-        cpal::SampleFormat::U16 => {
-            audio::build_stream::<u16>(&device, &stream_config, rx, Arc::clone(&status))
-        }
-        other => bail!("unsupported output sample format {other:?}"),
-    }?;
-    stream.play().context("failed to start output stream")?;
+        (None, None) => unreachable!(),
+    };
 
     let info = ui::StreamInfo {
         input: input_label(&cli.input),
@@ -282,15 +327,28 @@ fn main() -> Result<()> {
             }
             if let Some(token) = &endpoints.token {
                 // stdout on purpose (not a log): scripts starting a headless
-                // server capture the token to hand to remote clients.
-                println!("api token: {token}");
+                // server capture the token to hand to remote clients — unless
+                // stdout is the PCM output, where it would corrupt the stream.
+                if matches!(sink, Sink::Pipe(_)) && device_name == "stdout" {
+                    tracing::info!("api token: {token}");
+                } else {
+                    println!("api token: {token}");
+                }
             }
         }
         reader.join().ok();
-        while status.queued.load(std::sync::atomic::Ordering::Acquire) > 0 {
-            std::thread::sleep(Duration::from_millis(50));
+        match sink {
+            // The writer exits once the channel drains after the reader ends.
+            Sink::Pipe(writer) => {
+                writer.join().ok();
+            }
+            Sink::Device(_) => {
+                while status.queued.load(std::sync::atomic::Ordering::Acquire) > 0 {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                std::thread::sleep(Duration::from_millis(200)); // let the device drain
+            }
         }
-        std::thread::sleep(Duration::from_millis(200)); // let the device drain
         cleanup_socket(&api);
         if let Some(err) = status.error.lock().unwrap().clone() {
             bail!(err);

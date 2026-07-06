@@ -7,7 +7,7 @@
 //! [`Equalizer`](crate::equalizer::Equalizer) version counter.
 
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU8, AtomicU64, AtomicUsize, Ordering};
@@ -107,6 +107,83 @@ pub struct PipelineConfig {
     pub channels: usize,
     pub format: PcmFormat,
     pub out_rate: u32,
+}
+
+/// Where processed audio goes when it is NOT played on a device
+/// (`--output`): raw interleaved stereo s16le at the pipeline's output
+/// rate, either to stdout or into a FIFO.
+pub enum OutputTarget {
+    Stdout,
+    Fifo(std::path::PathBuf),
+}
+
+impl OutputTarget {
+    pub fn label(&self) -> String {
+        match self {
+            OutputTarget::Stdout => "stdout".to_string(),
+            OutputTarget::Fifo(path) => path.display().to_string(),
+        }
+    }
+}
+
+/// Pipe-output counterpart of [`build_stream`]: drain the channel and
+/// write raw s16le to the target until the input ends or the consumer
+/// goes away. There is no clock on this path — pacing comes from the
+/// input side and the pipe's own backpressure.
+pub fn writer_loop(target: OutputTarget, status: Arc<AudioStatus>, rx: Receiver<Vec<i16>>) {
+    let mut writer: Box<dyn io::Write> = match open_output(&target) {
+        Ok(writer) => writer,
+        Err(err) => {
+            status.set_error(format!("cannot open {}: {err}", target.label()));
+            return;
+        }
+    };
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Ok(chunk) = rx.recv() {
+        bytes.clear();
+        bytes.extend(chunk.iter().flat_map(|s| s.to_le_bytes()));
+        if let Err(err) = writer.write_all(&bytes) {
+            // EPIPE = the consumer closed; anything else is a real fault.
+            if err.kind() != io::ErrorKind::BrokenPipe {
+                status.set_error(format!("output write error: {err}"));
+            }
+            break;
+        }
+        status
+            .queued
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |q| {
+                Some(q.saturating_sub(chunk.len()))
+            })
+            .ok();
+        status
+            .frames_played
+            .fetch_add(chunk.len() as u64 / 2, Ordering::Relaxed);
+    }
+    let _ = writer.flush();
+}
+
+/// Open the pipe output. A missing FIFO path is created first; opening a
+/// FIFO for writing blocks until a reader shows up (the status line shows
+/// "waiting for input" during that window, since nothing streams yet).
+fn open_output(target: &OutputTarget) -> Result<Box<dyn io::Write>> {
+    match target {
+        OutputTarget::Stdout => Ok(Box::new(io::stdout().lock())),
+        OutputTarget::Fifo(path) => {
+            if !path.exists() {
+                let cpath = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+                    .context("invalid path")?;
+                let rc = unsafe { libc::mkfifo(cpath.as_ptr(), 0o644) };
+                if rc != 0 {
+                    bail!("mkfifo failed: {}", io::Error::last_os_error());
+                }
+            }
+            let file = File::options()
+                .write(true)
+                .open(path)
+                .with_context(|| format!("cannot open {}", path.display()))?;
+            Ok(Box::new(file))
+        }
+    }
 }
 
 /// Blocking read → DSP → send loop. Runs until the input ends (stdin /
