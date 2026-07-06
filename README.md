@@ -1,4 +1,8 @@
 # equalizer
+[![Release](https://github.com/tsirysndr/equalizer/actions/workflows/release.yml/badge.svg)](https://github.com/tsirysndr/equalizer/actions/workflows/release.yml)
+[![Crates.io](https://img.shields.io/crates/v/equalizer)](https://crates.io/crates/equalizer)
+[![Downloads](https://img.shields.io/crates/d/equalizer)](https://crates.io/crates/equalizer)
+[![License](https://img.shields.io/crates/l/equalizer)](LICENSE)
 
 A real-time terminal equalizer for raw PCM pipes. It reads audio from
 **stdin**, a **FIFO**, or a **unix socket**, runs it through the
