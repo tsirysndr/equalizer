@@ -1,0 +1,26 @@
+[package]
+name = "equalizer"
+version = "0.1.0"
+edition = "2024"
+description = "Pipe raw PCM through the Rockbox 10-band equalizer to the sound card, with a ratatui front-end"
+license = "GPL-2.0-or-later"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+cpal = "0.15"
+# use-dev-tty: read keys from /dev/tty via select() — the default mio
+# event source can't poll /dev/tty on macOS, which breaks the TUI whenever
+# stdin is the audio pipe ("Failed to initialize input reader").
+crossterm = { version = "0.28", features = ["use-dev-tty", "events"] }
+directories = "5"
+libc = "0.2"
+ratatui = "0.29"
+rockbox-dsp = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
