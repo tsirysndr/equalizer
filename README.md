@@ -7,12 +7,18 @@ bass/treble shelves, resampling) and plays the result on your sound card
 via [cpal](https://crates.io/crates/cpal) — while a
 [ratatui](https://ratatui.rs) interface lets you tweak the bands live.
 
-![equalizer TUI playing through a FIFO with the Synthwave '84 theme](preview.png)
+![equalizer TUI playing through a FIFO with the Synthwave '84 theme](https://raw.githubusercontent.com/tsirysndr/equalizer/main/preview.png)
 
 ## Table of Contents
 
 - [Features](#features)
 - [Installation](#installation)
+  - [macOS / Linux — Homebrew](#macos--linux--homebrew)
+  - [Debian / Ubuntu — `.deb`](#debian--ubuntu--deb)
+  - [Fedora / RHEL / openSUSE — `.rpm`](#fedora--rhel--opensuse--rpm)
+  - [Prebuilt tarballs](#prebuilt-tarballs)
+  - [Nix](#nix)
+  - [From source](#from-source)
 - [Quick Start](#quick-start)
 - [Input Sources](#input-sources)
   - [stdin pipe](#stdin-pipe)
@@ -45,6 +51,75 @@ via [cpal](https://crates.io/crates/cpal) — while a
 
 ## Installation
 
+### macOS / Linux — Homebrew
+
+```sh
+brew install tsirysndr/tap/equalizer
+```
+
+### Debian / Ubuntu — `.deb`
+
+Add the Gemfury apt repo once and install normally:
+
+```sh
+echo "deb [trusted=yes] https://apt.fury.io/tsiry/ /" \
+  | sudo tee /etc/apt/sources.list.d/tsiry.list
+sudo apt update && sudo apt install equalizer
+```
+
+Or download the `.deb` for your architecture (amd64 / arm64) from the
+[latest release](https://github.com/tsirysndr/equalizer/releases/latest):
+
+```sh
+curl -LO https://github.com/tsirysndr/equalizer/releases/latest/download/equalizer_0.1.0_amd64.deb
+sudo apt install ./equalizer_0.1.0_amd64.deb
+```
+
+`apt` pulls in `libasound2` (the ALSA runtime cpal needs) automatically.
+
+### Fedora / RHEL / openSUSE — `.rpm`
+
+Via the Gemfury yum repo:
+
+```sh
+sudo tee /etc/yum.repos.d/tsiry.repo <<'EOF'
+[tsiry]
+name=tsiry
+baseurl=https://yum.fury.io/tsiry/
+enabled=1
+gpgcheck=0
+EOF
+sudo dnf install equalizer
+```
+
+Or straight from the release asset:
+
+```sh
+sudo dnf install \
+  https://github.com/tsirysndr/equalizer/releases/latest/download/equalizer-0.1.0-1.x86_64.rpm
+```
+
+### Prebuilt tarballs
+
+Tarballs for macOS (Intel / Apple Silicon) and Linux (amd64 / arm64) are on
+the [releases page](https://github.com/tsirysndr/equalizer/releases), each
+with a `.sha256` alongside:
+
+```sh
+tar -xzf equalizer-<version>-<platform>.tar.gz
+sudo mv equalizer /usr/local/bin/
+```
+
+### Nix
+
+```sh
+nix run github:tsirysndr/equalizer            # run directly
+nix profile install github:tsirysndr/equalizer
+nix develop                                    # dev shell (in a checkout)
+```
+
+### From source
+
 ```sh
 git clone https://github.com/tsirysndr/equalizer
 cd equalizer
@@ -52,7 +127,12 @@ cargo install --path .
 ```
 
 Requires a C compiler (the `rockbox-dsp` crate compiles the Rockbox DSP
-sources with `cc`).
+sources with `cc`). On Linux you also need the ALSA development headers
+and pkg-config for cpal's audio output —
+`sudo apt install libasound2-dev pkg-config` (Debian/Ubuntu) or
+`sudo dnf install alsa-lib-devel pkgconf` (Fedora); at runtime the
+packages depend on `libasound2` / `alsa-lib`. On macOS, CoreAudio is
+used and nothing extra is needed.
 
 ## Quick Start
 

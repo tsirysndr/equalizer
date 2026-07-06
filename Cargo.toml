@@ -2,8 +2,24 @@
 name = "equalizer"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Pipe raw PCM through the Rockbox 10-band equalizer to the sound card, with a ratatui front-end"
 license = "GPL-2.0-or-later"
+authors = ["Tsiry Sandratraina <tsiry.sndr@rocksky.app>"]
+repository = "https://github.com/tsirysndr/equalizer"
+homepage = "https://github.com/tsirysndr/equalizer"
+readme = "README.md"
+keywords = ["equalizer", "audio", "dsp", "rockbox", "tui"]
+categories = ["multimedia::audio", "command-line-utilities"]
+# Keep the published crate lean: CI, packaging, and the screenshot stay in git.
+exclude = [
+    "preview.png",
+    "dist/",
+    ".github/",
+    ".tangled/",
+    "flake.nix",
+    "flake.lock",
+]
 
 [dependencies]
 anyhow = "1"

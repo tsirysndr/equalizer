@@ -1,0 +1,14 @@
+Package: equalizer
+Version: 0.1.0
+Section: sound
+Priority: optional
+Architecture: arm64
+Maintainer: Tsiry Sandratraina <tsiry.sndr@rocksky.app>
+Homepage: https://github.com/tsirysndr/equalizer
+Depends: libc6, libasound2
+Description: A real-time terminal equalizer for raw PCM pipes
+ equalizer reads raw PCM from stdin, a FIFO, or a unix socket, runs it
+ through the Rockbox DSP (10-band EQ, bass/treble shelves, resampling)
+ and plays the result on your sound card — while a Synthwave '84 ratatui
+ interface lets you tweak the bands live. Settings persist to a TOML
+ file in Rockbox's own eq_band_settings format.
