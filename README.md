@@ -83,8 +83,8 @@ Or download the `.deb` for your architecture (amd64 / arm64) from the
 [latest release](https://github.com/tsirysndr/equalizer/releases/latest):
 
 ```sh
-curl -LO https://github.com/tsirysndr/equalizer/releases/latest/download/equalizer_0.1.0_amd64.deb
-sudo apt install ./equalizer_0.1.0_amd64.deb
+curl -LO https://github.com/tsirysndr/equalizer/releases/latest/download/equalizer_0.2.0_amd64.deb
+sudo apt install ./equalizer_0.2.0_amd64.deb
 ```
 
 `apt` pulls in `libasound2` (the ALSA runtime cpal needs) automatically.
@@ -108,7 +108,7 @@ Or straight from the release asset:
 
 ```sh
 sudo dnf install \
-  https://github.com/tsirysndr/equalizer/releases/latest/download/equalizer-0.1.0-1.x86_64.rpm
+  https://github.com/tsirysndr/equalizer/releases/latest/download/equalizer-0.2.0-1.x86_64.rpm
 ```
 
 ### Prebuilt tarballs
