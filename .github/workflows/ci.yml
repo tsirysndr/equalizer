@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  ci:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # cpal links against ALSA on Linux (macOS uses CoreAudio, no dev pkg needed).
+      # protoc: tonic-build regenerates the gRPC API from proto/ at build time.
+      - name: Install ALSA dev headers and protoc
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config protobuf-compiler
+
+      - name: Install protoc
+        if: startsWith(matrix.os, 'macos')
+        run: brew install protobuf
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # Release profile throughout: the real-time DSP is unusably slow in
+      # debug, and it keeps the cache shared between test and build.
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Build
+        run: cargo build --release --locked --bin equalizer
