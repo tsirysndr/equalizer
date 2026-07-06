@@ -7,6 +7,8 @@ bass/treble shelves, resampling) and plays the result on your sound card
 via [cpal](https://crates.io/crates/cpal) — while a
 [ratatui](https://ratatui.rs) interface lets you tweak the bands live.
 
+![equalizer TUI playing through a FIFO with the Synthwave '84 theme](preview.png)
+
 ## Table of Contents
 
 - [Features](#features)
