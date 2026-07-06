@@ -25,3 +25,4 @@ steps:
   - name: test
     command: |
       cargo test --release --locked
+
