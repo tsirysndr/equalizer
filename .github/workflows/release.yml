@@ -176,37 +176,25 @@ jobs:
           # (no sound-card output at runtime; stdout/FIFO modes still work),
           # so only Rust is needed there. protoc is not needed anywhere: the
           # generated gRPC code is committed and build.rs skips codegen.
+          #
+          # aarch64 BSD builds are emulated and too slow for the release
+          # critical path — they live in release-bsd-aarch64.yml and attach
+          # their artifacts to the release after it is published.
           - label: freebsd-amd64
             os: freebsd
             os_version: "14.3"
             arch: x86-64
-            install_deps: sudo env ASSUME_ALWAYS_YES=YES pkg install -y rust alsa-lib pkgconf
-          - label: freebsd-aarch64
-            os: freebsd
-            os_version: "14.3"
-            arch: arm64
             install_deps: sudo env ASSUME_ALWAYS_YES=YES pkg install -y rust alsa-lib pkgconf
           - label: netbsd-amd64
             os: netbsd
             os_version: "10.1"
             arch: x86-64
             install_deps: sudo pkgin -y update && sudo pkgin -y install rust alsa-lib pkgconf
-          - label: netbsd-aarch64
-            os: netbsd
-            os_version: "10.1"
-            arch: arm64
-            install_deps: sudo pkgin -y update && sudo pkgin -y install rust alsa-lib pkgconf
           - label: openbsd-amd64
             os: openbsd
             os_version: "7.9"
             arch: x86-64
             install_deps: sudo pkg_add rust
-          # Disabled: OpenBSD arm64 build does not work on the emulated VM.
-          # - label: openbsd-aarch64
-          #   os: openbsd
-          #   os_version: "7.9"
-          #   arch: arm64
-          #   install_deps: sudo pkg_add rust
 
     steps:
       - name: Checkout
