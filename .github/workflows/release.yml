@@ -201,11 +201,12 @@ jobs:
             os_version: "7.9"
             arch: x86-64
             install_deps: sudo pkg_add rust
-          - label: openbsd-aarch64
-            os: openbsd
-            os_version: "7.9"
-            arch: arm64
-            install_deps: sudo pkg_add rust
+          # Disabled: OpenBSD arm64 build does not work on the emulated VM.
+          # - label: openbsd-aarch64
+          #   os: openbsd
+          #   os_version: "7.9"
+          #   arch: arm64
+          #   install_deps: sudo pkg_add rust
 
     steps:
       - name: Checkout
