@@ -166,7 +166,7 @@ jobs:
 
   build-bsd:
     name: ${{ matrix.label }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -176,32 +176,41 @@ jobs:
           # (no sound-card output at runtime; stdout/FIFO modes still work),
           # so only Rust is needed there. protoc is not needed anywhere: the
           # generated gRPC code is committed and build.rs skips codegen.
+          #
+          # arm64 VMs run on the native ARM runner so QEMU gets KVM
+          # acceleration instead of emulating aarch64 on x86.
           - label: freebsd-amd64
+            runner: ubuntu-latest
             os: freebsd
             os_version: "14.3"
             arch: x86-64
             install_deps: sudo env ASSUME_ALWAYS_YES=YES pkg install -y rust alsa-lib pkgconf
           - label: freebsd-aarch64
+            runner: ubuntu-24.04-arm
             os: freebsd
             os_version: "14.3"
             arch: arm64
             install_deps: sudo env ASSUME_ALWAYS_YES=YES pkg install -y rust alsa-lib pkgconf
           - label: netbsd-amd64
+            runner: ubuntu-latest
             os: netbsd
             os_version: "10.1"
             arch: x86-64
             install_deps: sudo pkgin -y update && sudo pkgin -y install rust alsa-lib pkgconf
           - label: netbsd-aarch64
+            runner: ubuntu-24.04-arm
             os: netbsd
             os_version: "10.1"
             arch: arm64
             install_deps: sudo pkgin -y update && sudo pkgin -y install rust alsa-lib pkgconf
           - label: openbsd-amd64
+            runner: ubuntu-latest
             os: openbsd
             os_version: "7.9"
             arch: x86-64
             install_deps: sudo pkg_add rust
           - label: openbsd-aarch64
+            runner: ubuntu-24.04-arm
             os: openbsd
             os_version: "7.9"
             arch: arm64
