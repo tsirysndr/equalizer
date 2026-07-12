@@ -22,6 +22,12 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v17
+        with:
+          name: tsirysndr
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
       - name: Build
         run: nix build .#default --print-build-logs
 

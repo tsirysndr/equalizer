@@ -126,6 +126,7 @@ sudo mv equalizer /usr/local/bin/
 ### Nix
 
 ```sh
+cachix use tsirysndr
 nix run github:tsirysndr/equalizer            # run directly
 nix profile install github:tsirysndr/equalizer
 nix develop                                    # dev shell (in a checkout)
